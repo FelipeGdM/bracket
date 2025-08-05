@@ -20,6 +20,49 @@ from bracket.utils.id_types import CourtId, MatchId, TournamentId
 from bracket.utils.types import assert_some
 
 
+def sort_matches(
+    matches: list[MatchWithDetailsDefinitive | MatchWithDetails]
+) -> list[MatchWithDetailsDefinitive | MatchWithDetails]:
+    """Computes the order of the matches with respect to results dependency
+
+    Args:
+        matches (list[MatchWithDetailsDefinitive  |  MatchWithDetails]): List of matches to sort
+
+    Returns:
+        list[MatchWithDetailsDefinitive | MatchWithDetails]: Sorted list
+    """
+
+    # We are going to compute the precedence of each match
+    # A lower value means that the match should occur early
+    matches_precedence_by_id = {}
+
+    for match in matches:
+        matches_precedence_by_id[match.id] = [match, -1]
+
+    def compute_match_precedence(id: MatchId):
+
+        input1_parent_id = matches_precedence_by_id[id][0].stage_item_input1_winner_from_match_id
+        input2_parent_id = matches_precedence_by_id[id][0].stage_item_input2_winner_from_match_id
+
+        if input1_parent_id is None and input2_parent_id is None:
+            # Both sides are defined, this match is ready to occur
+            return 0
+
+        if input1_parent_id is None:
+            return compute_match_precedence(input2_parent_id) + 1
+
+        if input2_parent_id is None:
+            return compute_match_precedence(input1_parent_id) + 1
+
+        return 1 + max(compute_match_precedence(input1_parent_id),
+                       compute_match_precedence(input2_parent_id))
+
+    for id in matches_precedence_by_id.keys():
+        matches_precedence_by_id[id][1] = compute_match_precedence(id)
+
+    return sorted(matches, key=lambda match: matches_precedence_by_id[match.id][1])
+
+
 async def schedule_all_unscheduled_matches(
     tournament_id: TournamentId, stages: list[StageWithStageItems]
 ) -> None:
@@ -37,19 +80,21 @@ async def schedule_all_unscheduled_matches(
         court = courts[min(i, len(courts) - 1)]
         start_time = tournament.start_time
         position_in_schedule = 0
-        for round_ in stage_item.rounds:
-            for match in round_.matches:
-                if match.start_time is None and match.position_in_schedule is None:
-                    await sql_reschedule_match_and_determine_duration_and_margin(
-                        court.id,
-                        start_time,
-                        position_in_schedule,
-                        match,
-                        tournament,
-                    )
+        matches_to_schedule = sort_matches(
+            [match for round_ in stage_item.rounds for match in round_.matches]
+        )
+        for match in matches_to_schedule:
+            if match.start_time is None and match.position_in_schedule is None:
+                await sql_reschedule_match_and_determine_duration_and_margin(
+                    court.id,
+                    start_time,
+                    position_in_schedule,
+                    match,
+                    tournament,
+                )
 
-                start_time += timedelta(minutes=match.duration_minutes)
-                position_in_schedule += 1
+            start_time += timedelta(minutes=match.duration_minutes)
+            position_in_schedule += 1
 
     # Then, all other stages
     for stage in stages[1:]:
